@@ -1,4 +1,4 @@
-# Analyze summary statistics generated from individual level simulations
+# Summary level simulations with directional pleiotropy and InSIDE assumption violated
 rm(list = ls())
 library(data.table)
 library(dplyr)
@@ -11,36 +11,70 @@ library(penalized)
 source("MR_lasso.R")
 
 thetavec = c(0.2, 0, -0.2)
-Nvec = c(5e4, 8e4, 1e5)
+thetaUvec = c(0.3, 0.5)
+Nvec = c(5e4, 8e4, 1e5, 1.5e5, 2e5, 5e5, 1e6) # 1:7
 prop_invalid_vec = c(0.3, 0.5, 0.7)
 
 temp = as.integer(commandArgs(trailingOnly = TRUE))
 theta = thetavec[temp[1]] # True causal effect from X to Y
-thetaU = thetaUx = 0.3 # Effect of the confounder on Y/X
-N = Nvec[temp[2]] # Sample size for exposure X
-prop_invalid = prop_invalid_vec[temp[3]] # Proportion of invalid IVs
+thetaU = thetaUx = thetaUvec[temp[2]] # Effect of the confounder on Y/X
+N = Nvec[temp[3]] # Sample size for exposure X
+prop_invalid = prop_invalid_vec[temp[4]] # Proportion of invalid IVs
 
-pthr = 5e-8
-NxNy_ratio = 2
-M = 2e5
+pthr = 5e-8 # p-value threshold for instrument selection
+NxNy_ratio = 2 # Ratio of sample sizes for X and Y
+M = 2e5 # Total number of independent SNPs representing the common variants in the genome
 
-print(paste("N", N, "pthr", pthr, "theta", theta, "thetaU", thetaU, "prop_invalid", prop_invalid, "NxNy_ratio", NxNy_ratio))
+# Model parameters for effect size distribution
+pi1=0.02*(1-prop_invalid); pi3=0.01
+pi2=0.02*prop_invalid; 
+sigma2x = sigma2y = 5e-5; sigma2u = 1e-4; sigma2x_td = sigma2y_td = (5e-5)-thetaU*thetaUx*sigma2u
+
+print(paste("N", N, "pthr", pthr, "pi1", pi1, "theta", theta, "thetaU", thetaU, "prop_invalid", prop_invalid, "NxNy_ratio", NxNy_ratio))
 
 nx = N; ny = N/NxNy_ratio
-est = matrix(NA, nrow = 200, ncol = 3+10*3+2)
+est = matrix(NA, nrow = 200, ncol = 3+10*3)
 mr_methods = c("IVW", "median", "mode", "PRESSO", "Robust", "Lasso", "egger", "conmix", "MRMix", "RAPS")
-colnames(est) = c("numIV", "varX_expl","varY_expl", mr_methods, paste0(mr_methods,"_se"), paste0(mr_methods,"_time"), "PRESSO_pval", "conmix_CIcover0")
+colnames(est) = c("numIV", "varX_expl","varY_expl", mr_methods, paste0(mr_methods,"_se"), paste0(mr_methods,"_time"))
 # varX_expl: variance of X explained by IVs; varY_expl: variance of Y explained by IVs
 
-load(paste0("betahat_200sim/betahat_200sim_theta",theta,"_thetaU",thetaU,"_N",N,"_prop_invalid",prop_invalid,".rda"))
 for (repind in 1:200){
-    set.seed(8967*repind)
-    numIV = nrow(betahat_200sim[[repind]])
-    est[repind,1] = numIV
+    set.seed(4365*repind)
     
+    # Generate indices of causal SNPs
+    ind1 = sample(M, round(M*pi1))
+    causalsnps = ind1
+    ind2 = sample(setdiff(1:M,causalsnps), round(M*pi2))
+    causalsnps = c(causalsnps,ind2)
+    ind3 = sample(setdiff(1:M,causalsnps), round(M*pi3))
+    causalsnps = c(causalsnps,ind3)
+    
+    # Simulate effect size
+    gamma = phi = alpha = rep(0,M)
+    
+    gamma[ind1] = rnorm(length(ind1), mean = 0, sd = sqrt(sigma2x))
+    gamma[ind2] = rnorm(length(ind2), mean = 0, sd = sqrt(sigma2x_td))
+    phi[ind2] = rnorm(length(ind2), mean = 0, sd = sqrt(sigma2u))
+    alpha[ind2] = rnorm(length(ind2), mean = 0.005, sd = sqrt(sigma2y_td))
+    alpha[ind3] = rnorm(length(ind3), mean = 0.005, sd = sqrt(sigma2y))
+    
+    # Generate summary statistics directly from summary-level model implied by individual-level model
+    betax = gamma + thetaUx*phi
+    betay = alpha + theta*betax + thetaU*phi
+    betahat_x = betax + rnorm(M, mean = 0, sd = sqrt(1/nx))
+    betahat_y = betay + rnorm(M, mean = 0, sd = sqrt(1/ny))
+    
+    # Filter the SNPs that reach genome-wide significance in the study associated with X.
+    ind_filter = which(2*pnorm(-sqrt(nx)*abs(betahat_x))<pthr)
+    numIV = length(ind_filter)
+    est[repind,1] = numIV
+    est[repind,2] = sum(betax[ind_filter]^2)
+    est[repind,3] = sum(betay[ind_filter]^2)
+    
+    # MR analysis with 10 methods
     if (numIV>2){
-        betahat_x.flt = as.vector(betahat_200sim[[repind]][,1])
-        betahat_y.flt = as.vector(betahat_200sim[[repind]][,2])
+        betahat_x.flt = betahat_x[ind_filter]
+        betahat_y.flt = betahat_y[ind_filter]
         
         mr.obj = mr_input(bx = betahat_x.flt, bxse = rep(1/sqrt(nx), length(betahat_x.flt)),
                           by = betahat_y.flt, byse = rep(1/sqrt(ny), length(betahat_y.flt)))
@@ -71,29 +105,22 @@ for (repind in 1:200){
         rm(res)
         # 4.MR-PRESSO
         presso.df = data.frame(bx = betahat_x.flt, by = betahat_y.flt, bxse = rep(1/sqrt(nx),length(betahat_x.flt)), byse = rep(1/sqrt(ny), length(betahat_y.flt)))
-        if (nx<=2e5){
+        if (N<=2e5){
             T0 = proc.time()[3]
-            res = try(mr_presso(BetaOutcome = "by", BetaExposure = "bx", SdOutcome = "byse", SdExposure = "bxse", 
-                                OUTLIERtest = TRUE, DISTORTIONtest = TRUE, data = presso.df, NbDistribution = 3000, SignifThreshold = 0.05))
+            res = mr_presso(BetaOutcome = "by", BetaExposure = "bx", SdOutcome = "byse", SdExposure = "bxse", 
+                            OUTLIERtest = TRUE, DISTORTIONtest = TRUE, data = presso.df, NbDistribution = 3000, SignifThreshold = 0.05)
             T1 = proc.time()[3]
-            if (class(res)!="try-error"){
-                if (!is.na(res$`Main MR results`[2,"Causal Estimate"]) & !is.na(res$`Main MR results`[2,"Sd"])){
-                    est[repind,3+4] = res$`Main MR results`[2,"Causal Estimate"]
-                    est[repind,3+14] = res$`Main MR results`[2,"Sd"]
-                    est[repind,34] = res$`Main MR results`[2,"P-value"]
-                } else{
-                    est[repind,3+4] = res$`Main MR results`[1,"Causal Estimate"]
-                    est[repind,3+14] = res$`Main MR results`[1,"Sd"]
-                    est[repind,34] = res$`Main MR results`[1,"P-value"]
-                }
-                est[repind,3+24] = T1-T0
+            if (!is.na(res$`Main MR results`[2,"Causal Estimate"]) & !is.na(res$`Main MR results`[2,"Sd"])){
+                est[repind,3+4] = res$`Main MR results`[2,"Causal Estimate"]
+                est[repind,3+14] = res$`Main MR results`[2,"Sd"]
             } else{
-                print(paste("Rep",repind,"numIV",numIV))
-                print(res)
+                est[repind,3+4] = res$`Main MR results`[1,"Causal Estimate"]
+                est[repind,3+14] = res$`Main MR results`[1,"Sd"]
             }
+            est[repind,3+24] = T1-T0
             rm(res)
         }
-        # 5. MR-Robust
+        # 5. robust
         T0 = proc.time()[3]
         res = mr_ivw(mr.obj,"random", robust = TRUE)
         T1 = proc.time()[3]
@@ -103,16 +130,11 @@ for (repind in 1:200){
         rm(res)
         # 6. MR-Lasso
         T0 = proc.time()[3]
-        res = try(MR_lasso(presso.df$by, presso.df$bx, presso.df$byse))
+        res = MR_lasso(presso.df$by, presso.df$bx, presso.df$byse)
         T1 = proc.time()[3]
-        if (class(res)!="try-error"){
-            est[repind,3+6] = res$ThetaEstimate
-            est[repind,3+16] = res$ThetaSE
-            est[repind,3+26] = T1-T0
-        } else{
-            print(paste("Rep",repind,"numIV",numIV))
-            print(res)
-        }
+        est[repind,3+6] = res$ThetaEstimate
+        est[repind,3+16] = res$ThetaSE
+        est[repind,3+26] = T1-T0
         rm(res)
         # 7. Egger
         T0 = proc.time()[3]
@@ -131,7 +153,6 @@ for (repind in 1:200){
         if (length(CIlength)>1) print(paste("Repind",repind,"conmix multimodal"))
         est[repind,3+18] = sum(CIlength)/1.96/2 ## Caution: this may be problematic
         est[repind,3+28] = T1-T0
-        est[repind,35] = ifelse(sum((res$CILower<=0)&(res$CIUpper>=0))>0, 1, 0)
         rm(res)
         # 9. MRMix
         theta_temp_vec = seq(-0.5,0.5,by=0.01)

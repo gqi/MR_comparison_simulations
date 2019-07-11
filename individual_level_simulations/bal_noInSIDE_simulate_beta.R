@@ -1,4 +1,4 @@
-# Individual simulations with balanced pleiotropy and InSIDE assumption violated
+# Individual-level simulations with balanced pleiotropy and InSIDE assumption violated
 rm(list = ls())
 library(data.table)
 library(dplyr)

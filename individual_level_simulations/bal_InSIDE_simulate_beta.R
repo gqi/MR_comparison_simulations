@@ -1,4 +1,4 @@
-# Individual simulations with balanced pleiotropy and InSIDE assumption satisfied
+# Individual-level simulations with balanced pleiotropy and InSIDE assumption satisfied
 rm(list = ls())
 library(data.table)
 library(dplyr)
